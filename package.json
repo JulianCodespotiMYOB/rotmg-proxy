@@ -1,0 +1,22 @@
+{
+  "name": "rotmg-proxy",
+  "version": "1.0.0",
+  "description": "",
+  "main": "mitm-proxy.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "run": "npx tsc && node dist/mitm-proxy.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/xml2js": "^0.4.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "xml2js": "^0.6.2"
+  }
+}
