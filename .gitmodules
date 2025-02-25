@@ -1,0 +1,3 @@
+[submodule "libs/realmlib"]
+	path = libs/realmlib
+	url = https://github.com/rotmg-network/realmlib.git
