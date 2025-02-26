@@ -15,5 +15,5 @@ exports.OUTGOING_KEY = exports.INCOMING_KEY = void 0;
  * They are subject to change with game updates. If you experience decryption errors or unknown packets,
  * you may need to re‑extract the keys from the current RotMG client.
  */
-exports.INCOMING_KEY = "5a4d2016bc16dc64883194ffd9";
-exports.OUTGOING_KEY = "c91d9eec420160730d825604e0";
+exports.INCOMING_KEY = "612a806cac78114ba5013cb531";
+exports.OUTGOING_KEY = "BA15DE";

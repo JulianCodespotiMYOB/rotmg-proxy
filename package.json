@@ -1,13 +1,21 @@
 {
   "name": "rotmg-proxy",
   "version": "1.0.0",
-  "description": "",
-  "main": "mitm-proxy.js",
+  "description": "A man-in-the-middle proxy for Realm of the Mad God",
+  "main": "dist/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "run": "npx tsc && node dist/mitm-proxy.js"
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:simple": "node dist/simple-proxy.js",
+    "dev": "ts-node src/index.ts",
+    "dev:simple": "ts-node src/simple-proxy.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": [
+    "rotmg",
+    "proxy",
+    "mitm"
+  ],
   "author": "",
   "license": "ISC",
   "devDependencies": {
