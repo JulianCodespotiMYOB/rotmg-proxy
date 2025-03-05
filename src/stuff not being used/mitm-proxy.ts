@@ -3,7 +3,7 @@ import * as tls from 'tls';
 import { CustomRC4, CLIENT_SEND_KEY, CLIENT_RECEIVE_KEY, SERVER_SEND_KEY, SERVER_RECEIVE_KEY } from './custom-rc4';
 import { createPacket, Packet, PacketIO, PacketType, RC4, Reader, Writer } from 'realmlib/build';
 import { PACKET_MAP } from './packet-map';
-import { DataPacket } from '../libs/realmlib/build/packet';
+import { DataPacket } from '../../libs/realmlib/build/packet';
 import { CLIENT_TO_SERVER_RC4, SERVER_TO_CLIENT_RC4 } from './rc4-config';
 // (Assume that your PACKET_MAP and related packet parsing logic are defined elsewhere if needed)
 
@@ -120,35 +120,87 @@ export class RotmgMitmProxy {
    * Sets up the manual tunnel between client and server.
    * This version uses a simple buffering approach similar to KRelay’s.
    */
+// Modified version of mitm-proxy.ts
 
-  private setupTunnel(clientSocket: net.Socket, serverSocket: net.Socket, clientId: string): void {
-    // Initialize PacketIO instances using realmlib's implementation.
+private setupTunnel(clientSocket: net.Socket, serverSocket: net.Socket, clientId: string): void {
+  // We'll still use PacketIO but we'll add better error handling
+  try {
     const clientIO = new PacketIO({
       socket: clientSocket,
-      rc4: CLIENT_TO_SERVER_RC4,  // Use client-to-server config for data coming from client
+      rc4: CLIENT_TO_SERVER_RC4,
       packetMap: PACKET_MAP
     });
+
     const serverIO = new PacketIO({
       socket: serverSocket,
-      rc4: SERVER_TO_CLIENT_RC4,  // Use server-to-client config for data coming from server
+      rc4: SERVER_TO_CLIENT_RC4,
       packetMap: PACKET_MAP
     });
 
-    // Log and forward packets in both directions.
-    Object.values(PacketType).forEach((type) => {
+    // Add error handlers to prevent crashes
+    clientIO.on('error', (err) => {
+      console.error(`[${clientId}] Client PacketIO error:`, err);
+      // Just log and continue, don't crash
+    });
 
+    serverIO.on('error', (err) => {
+      console.error(`[${clientId}] Server PacketIO error:`, err);
+      // Just log and continue, don't crash
+    });
+
+    // Register for all packet types
+    Object.values(PacketType).forEach((type) => {
+      try {
         clientIO.on(type, (packet: Packet) => {
-          console.log(`[${clientId}] Client -> Server: ${type}`);
-          console.log(packet.toString());
-          serverIO.send(packet);
+          try {
+            console.log(`[${clientId}] Client -> Server: ${type}`);
+            console.log(packet.toString());
+            serverIO.send(packet);
+          } catch (error) {
+            console.error(`Error handling client packet of type ${type}:`, error);
+            // Just forward the raw data if parsing fails
+            if (serverSocket.writable) {
+              serverSocket.write(clientSocket.read());
+            }
+          }
         });
+
         serverIO.on(type, (packet: Packet) => {
-          console.log(`[${clientId}] Server -> Client: ${type}`);
-          console.log(packet.toString());
-          clientIO.send(packet);
+          try {
+            console.log(`[${clientId}] Server -> Client: ${type}`);
+            console.log(packet.toString());
+            clientIO.send(packet);
+          } catch (error) {
+            console.error(`Error handling server packet of type ${type}:`, error);
+            // Just forward the raw data if parsing fails
+            if (clientSocket.writable) {
+              clientSocket.write(serverSocket.read());
+            }
+          }
         });
+      } catch (error) {
+        console.error(`Error registering handler for packet type ${type}:`, error);
+      }
+    });
+  } catch (error) {
+    console.error(`Error setting up packet handling for client ${clientId}:`, error);
+
+    // Fall back to simple pass-through if PacketIO setup fails
+    console.log(`Falling back to simple pass-through for client ${clientId}`);
+
+    clientSocket.on('data', (data) => {
+      if (serverSocket.writable) {
+        serverSocket.write(data);
+      }
+    });
+
+    serverSocket.on('data', (data) => {
+      if (clientSocket.writable) {
+        clientSocket.write(data);
+      }
     });
   }
+}
 
 
   public close(): void {

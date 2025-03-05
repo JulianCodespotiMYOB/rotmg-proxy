@@ -1,29 +1,35 @@
-// passthrough-proxy.ts - Simple Passthrough Proxy for ROTMG
-
 import * as net from 'net';
-import { CustomRC4, CLIENT_SEND_KEY, CLIENT_RECEIVE_KEY, SERVER_SEND_KEY, SERVER_RECEIVE_KEY } from './custom-rc4';
+import { PACKET_MAP } from './stuff not being used/packet-map';
+import { AutoAim, AutoAimConfig } from './modules/autoaim';
+import { EntityTracker } from './modules/entity-tracker';
+import { PacketModifier } from './modules/packet-modifier';
+import { logPacket } from './utils/logger';
 
-const PROXY_PORT = 2050;
-const GAME_SERVER_HOST = '51.222.11.213'; // From the Python code
-const GAME_SERVER_PORT = 2050;
-
-/**
- * A simplified passthrough proxy for ROTMG
- */
-class RotmgPassthroughProxy {
+export class RotmgPassthroughProxy {
   private server: net.Server;
+  private port: number;
+  private packetSequence: any[] = [];
+  private serverSocket: net.Socket | null = null;
+  private packetStats: Map<string, number> = new Map();
 
-  constructor() {
+  // Module instances
+  private entityTracker: EntityTracker;
+  private autoAim: AutoAim;
+  private packetModifier: PacketModifier;
+
+  constructor(port: number = 2050, autoAimConfig: AutoAimConfig) {
+    this.port = port;
     this.server = net.createServer(this.handleConnection.bind(this));
+
+    // Initialize modules
+    this.entityTracker = new EntityTracker();
+    this.autoAim = new AutoAim(this.entityTracker, autoAimConfig);
+    this.packetModifier = new PacketModifier(this.autoAim);
   }
 
-  /**
-   * Start the proxy server
-   */
   public start(): void {
-    this.server.listen(PROXY_PORT, () => {
-      console.log(`ROTMG Passthrough Proxy listening on port ${PROXY_PORT}`);
-      console.log(`Connect your client to localhost:${PROXY_PORT}`);
+    this.server.listen(this.port, () => {
+      console.log(`ROTMG Passthrough Proxy listening on port ${this.port}`);
     });
 
     this.server.on('error', (err) => {
@@ -31,140 +37,83 @@ class RotmgPassthroughProxy {
     });
   }
 
-  /**
-   * Handle a new client connection
-   */
+
+  public close(): void {
+    if (this.server) {
+      this.server.close(() => {
+        console.log('Proxy server closed');
+      });
+    }
+  }
+
+  // Show packet statistics
+  public printStats(): void {
+    console.log("\n--- Packet Statistics ---");
+
+    // Sort by frequency
+    const sortedStats = [...this.packetStats.entries()]
+      .sort((a, b) => b[1] - a[1]);
+
+    for (const [type, count] of sortedStats) {
+      console.log(`${type}: ${count}`);
+    }
+    console.log("------------------------\n");
+  }
+
   private handleConnection(clientSocket: net.Socket): void {
-    console.log(`Client connected from ${clientSocket.remoteAddress}:${clientSocket.remotePort}`);
+    const clientId = `${clientSocket.remoteAddress}:${clientSocket.remotePort}`.split(':').pop();
+    console.log(`Client connected: ${clientId}`);
 
-    // Initial state
-    let isHttpConnect = false;
-    let connectHandled = false;
-    let buffer = Buffer.alloc(0);
+    // Reset state for new connection
+    this.packetSequence = [];
+    this.packetStats.clear();
 
-    // Create RC4 ciphers for later use if needed
-    const clientToServerCipher = new CustomRC4(CLIENT_SEND_KEY);
-    const serverToClientCipher = new CustomRC4(SERVER_SEND_KEY);
+    // Wait for initial data
+    clientSocket.once('data', (data) => {
+      const header = data.toString('utf8', 0, Math.min(data.length, 200));
 
-    // Connect to the ROTMG game server directly
-    const serverSocket = net.connect({
-      host: GAME_SERVER_HOST,
-      port: GAME_SERVER_PORT
-    }, () => {
-      console.log(`Connected to game server at ${GAME_SERVER_HOST}:${GAME_SERVER_PORT}`);
-    });
-
-    // Handle client data
-    clientSocket.on('data', (data) => {
-      try {
-        // If we haven't processed a potential HTTP CONNECT yet, check for it
-        if (!connectHandled) {
-          // Append to our buffer
-          buffer = Buffer.concat([buffer, data]);
-
-          // Check if this looks like an HTTP CONNECT
-          const bufferStr = buffer.toString('utf8', 0, Math.min(buffer.length, 100));
-
-          if (bufferStr.startsWith('CONNECT')) {
-            console.log('HTTP CONNECT request detected:', bufferStr);
-            isHttpConnect = true;
-            connectHandled = true;
-
-            // Respond with 200 Connection Established
-            clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-
-            // Don't forward the CONNECT request to the game server
-            return;
-          } else if (buffer.length >= 5) {
-            // This doesn't look like an HTTP CONNECT, treat as game traffic
-            console.log('Direct game connection detected');
-            connectHandled = true;
-
-            // Process the buffered data as game data
-            processAndForwardGameData(buffer, true);
-            buffer = Buffer.alloc(0);
-            return;
-          }
-        } else if (isHttpConnect) {
-          // This is data after the HTTP CONNECT was established
-          processAndForwardGameData(data, true);
-        } else {
-          // Direct game connection
-          processAndForwardGameData(data, true);
-        }
-      } catch (error) {
-        console.error('Error handling client data:', error);
+      // Check if it's an HTTP CONNECT request
+      if (header.startsWith('CONNECT')) {
+        this.handleHttpConnect(clientSocket, data);
+      } else {
+        this.handleDirectConnection(clientSocket, data);
       }
     });
 
-    // Handle server data
-    serverSocket.on('data', (data) => {
-      try {
-        // Always process and forward game data from server to client
-        processAndForwardGameData(data, false);
-      } catch (error) {
-        console.error('Error handling server data:', error);
-      }
+    clientSocket.on('error', (err) => {
+      console.error(`Client socket error (${clientId}):`, err);
     });
 
-    // Process and forward game data with proper RC4 handling
-    function processAndForwardGameData(data: Buffer, isClientToServer: boolean): void {
-      try {
-        // Clone the data so we can modify it
-        const processedData = Buffer.from(data);
+    clientSocket.on('close', () => {
+      console.log(`Client socket closed for ${clientId}`);
+      this.printStats(); // Print stats on disconnect
+      this.cleanup();
+    });
+  }
 
-        // Check if this looks like a game packet (has at least a header)
-        if (processedData.length >= 5) {
-          // Log packet info
-          const packetId = processedData[4];
-          console.log(`${isClientToServer ? 'Client → Server' : 'Server → Client'} Packet ID: ${packetId}, Size: ${processedData.length}`);
+  private handleHttpConnect(clientSocket: net.Socket, initialData: Buffer): void {
+    const header = initialData.toString('utf8', 0, Math.min(initialData.length, 200));
+    const match = header.match(/CONNECT\s+([^:]+):(\d+)/);
 
-          // Process data part (after 5-byte header)
-          if (processedData.length > 5) {
-            const dataToProcess = processedData.subarray(5);
-
-            // Apply appropriate RC4 encryption/decryption
-            if (isClientToServer) {
-              // Client → Server: decrypt, then re-encrypt
-              clientToServerCipher.decrypt(dataToProcess);
-
-              // Here you could inspect or modify the packet
-
-              // Reset cipher state and re-encrypt
-              clientToServerCipher.reset();
-              clientToServerCipher.encrypt(dataToProcess);
-            } else {
-              // Server → Client: decrypt, then re-encrypt
-              serverToClientCipher.decrypt(dataToProcess);
-
-              // Here you could inspect or modify the packet
-
-              // Reset cipher state and re-encrypt
-              serverToClientCipher.reset();
-              serverToClientCipher.encrypt(dataToProcess);
-            }
-          }
-        } else {
-          console.log(`${isClientToServer ? 'Client → Server' : 'Server → Client'} Non-packet data, size: ${processedData.length}`);
-        }
-
-        // Forward the processed data
-        if (isClientToServer) {
-          serverSocket.write(processedData);
-        } else {
-          clientSocket.write(processedData);
-        }
-      } catch (error) {
-        console.error('Error processing game data:', error);
-      }
+    if (!match) {
+      console.error('Invalid CONNECT request format');
+      clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+      return;
     }
 
-    // Handle socket errors and closures
-    clientSocket.on('error', (err) => {
-      console.error('Client socket error:', err);
-      if (!serverSocket.destroyed) {
-        serverSocket.end();
-      }
+    const targetHost = match[1];
+    const targetPort = parseInt(match[2], 10);
+    console.log(`Client wants to connect to ${targetHost}:${targetPort}`);
+
+    // Connect to the target server
+    const serverSocket = net.connect(targetPort, targetHost, () => {
+      console.log(`Connected to game server at ${targetHost}:${targetPort}`);
+
+      // Send success response to client
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+      // Setup direct proxy without any packet processing
+      this.setupDirectProxy(clientSocket, serverSocket);
     });
 
     serverSocket.on('error', (err) => {
@@ -174,8 +123,115 @@ class RotmgPassthroughProxy {
       }
     });
 
+    serverSocket.on('close', () => {
+      console.log('Server socket closed');
+      this.cleanup();
+      if (!clientSocket.destroyed) {
+        clientSocket.end();
+      }
+    });
+  }
+
+  private handleDirectConnection(clientSocket: net.Socket, initialData: Buffer): void {
+    // For direct connections, connect to a known game server
+    const targetHost = '54.79.72.84'; // Default to a known server IP
+    const targetPort = 2050;
+
+    console.log(`Direct connection detected, connecting to ${targetHost}:${targetPort}`);
+
+    const serverSocket = net.connect(targetPort, targetHost, () => {
+      console.log(`Connected to game server at ${targetHost}:${targetPort}`);
+
+
+      // If we have initial data, send it to the server
+      if (initialData.length > 0) {
+        serverSocket.write(initialData);
+        logPacket(initialData, true, this.packetStats, this.packetSequence);
+      }
+
+      // Setup direct proxy without any packet processing
+      this.setupDirectProxy(clientSocket, serverSocket);
+    });
+
+    serverSocket.on('error', (err) => {
+      console.error('Server socket error:', err);
+      if (!clientSocket.destroyed) {
+        clientSocket.end();
+      }
+    });
+
+    serverSocket.on('close', () => {
+      console.log('Server socket closed');
+      this.cleanup();
+      if (!clientSocket.destroyed) {
+        clientSocket.end();
+      }
+    });
+  }
+
+  private setupDirectProxy(clientSocket: net.Socket, serverSocket: net.Socket): void {
+    // Store server socket for potential auto-responses
+    this.serverSocket = serverSocket;
+
+    // Handle client to server data - process and potentially modify
+    clientSocket.on('data', (data) => {
+      try {
+        // Extract packet info
+        const packetId = data.length >= 5 ? data[4] : -1;
+
+        // Log the original packet
+        logPacket(data, true, this.packetStats, this.packetSequence);
+
+        // Pass to entity tracker for processing
+        this.entityTracker.processPacket(packetId, data, false);
+
+        // Apply autoaim if it's a PLAYERSHOOT packet (ID 30)
+        let processedData = data;
+        if (packetId === 30) { // PLAYERSHOOT
+          processedData = this.packetModifier.modifyPlayerShootPacket(data);
+        }
+
+        // Forward the possibly modified data
+        if (serverSocket.writable) {
+          serverSocket.write(processedData);
+        }
+      } catch (error) {
+        console.error('Error processing client data:', error);
+        // Forward the original unmodified data as fallback
+        if (serverSocket.writable) {
+          serverSocket.write(data);
+        }
+      }
+    });
+
+    // Handle server to client data - process for entity tracking
+    serverSocket.on('data', (data) => {
+      try {
+        // Extract packet info for logging
+        const packetId = data.length >= 5 ? data[4] : -1;
+
+        // Log the packet
+        logPacket(data, false, this.packetStats, this.packetSequence);
+
+        // Pass to entity tracker for processing
+        this.entityTracker.processPacket(packetId, data, true);
+
+        // Forward unchanged
+        if (clientSocket.writable) {
+          clientSocket.write(data);
+        }
+      } catch (error) {
+        console.error('Error processing server data:', error);
+        // Forward the original data as fallback
+        if (clientSocket.writable) {
+          clientSocket.write(data);
+        }
+      }
+    });
+    // Handle socket closures
     clientSocket.on('close', () => {
       console.log('Client socket closed');
+      this.cleanup();
       if (!serverSocket.destroyed) {
         serverSocket.end();
       }
@@ -183,20 +239,29 @@ class RotmgPassthroughProxy {
 
     serverSocket.on('close', () => {
       console.log('Server socket closed');
+      this.cleanup();
       if (!clientSocket.destroyed) {
         clientSocket.end();
       }
     });
   }
+
+  private cleanup(): void {
+    // Keep the packet sequence and stats for debugging
+  }
+
+  // Update autoaim configuration
+  updateAutoAimConfig(config: Partial<AutoAimConfig>): void {
+    this.autoAim.updateConfig(config);
+  }
+
+  // Enable/disable autoaim
+  setAutoAimEnabled(enabled: boolean): void {
+    this.autoAim.updateConfig({ enabled });
+  }
+
+  // Change targeting strategy
+  setTargetingStrategy(strategy: string): void {
+    this.autoAim.updateConfig({ targetingStrategy: strategy });
+  }
 }
-
-// Create and start the proxy
-const proxy = new RotmgPassthroughProxy();
-proxy.start();
-
-console.log('ROTMG Passthrough Proxy started');
-console.log('Using RC4 keys from Python implementation:');
-console.log(`Client Send Key: ${CLIENT_SEND_KEY}`);
-console.log(`Client Receive Key: ${CLIENT_RECEIVE_KEY}`);
-console.log(`Server Send Key: ${SERVER_SEND_KEY}`);
-console.log(`Server Receive Key: ${SERVER_RECEIVE_KEY}`);
